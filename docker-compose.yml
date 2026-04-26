@@ -1,0 +1,14 @@
+version: "3.9"
+
+services:
+  tg-youtube-bot:
+    image: tg-youtube-bot:latest
+    container_name: tg-youtube-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

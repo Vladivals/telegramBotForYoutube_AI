@@ -1,0 +1,57 @@
+name: Deploy to Server
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Deploy to 31.44.3.127
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key.pem
+          chmod 600 ~/.ssh/deploy_key.pem
+          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Deploy to server
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key.pem \
+              -o StrictHostKeyChecking=no \
+              ${SERVER_USER}@${SERVER_HOST} << 'ENDSSH'
+            set -e
+
+            # Navigate to project directory
+            cd /opt/tg-youtube-bot
+
+            # Pull latest code
+            git pull origin main
+
+            # Build new Docker image
+            docker build -t tg-youtube-bot:latest .
+
+            # Stop and remove old container
+            docker stop tg-youtube-bot || true
+            docker rm tg-youtube-bot || true
+
+            # Start new container
+            docker compose up -d
+
+            # Check it started
+            sleep 3
+            docker ps | grep tg-youtube-bot && echo "✅ Bot deployed successfully!" || echo "❌ Container not running!"
+          ENDSSH
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key.pem
