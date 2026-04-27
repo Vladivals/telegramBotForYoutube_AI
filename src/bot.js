@@ -1,8 +1,9 @@
 require("dotenv").config();
 const { Telegraf } = require("telegraf");
 const cron         = require("node-cron");
-const { generateVoiceover }     = require("./services/geminiTTS.service");
-const { submitParanormalJob }   = require("./services/paranormalVideoBuilder.service");
+const { generateVoiceover }        = require("./services/geminiTTS.service");
+const { submitParanormalJob,
+        cancelParanormalJob }       = require("./services/paranormalVideoBuilder.service");
 const { isUserAllowed, canUseRecipeVoice, canUseParanormalChannel } = require("./middleware/auth.middleware");
 const { logInfo, logError } = require("./utils/logger");
 const fs   = require("fs");
@@ -19,14 +20,16 @@ if (!BOT_TOKEN) {
 const bot = new Telegraf(BOT_TOKEN);
 
 // ─── Button labels ─────────────────────────────────────────────────────────────
-const BTN_RECIPE    = "🎙️ Голос для рецептов";
+const BTN_RECIPE     = "🎙️ Голос для рецептов";
 const BTN_PARANORMAL = "👻 Паранормальный канал";
+const BTN_CANCEL     = "🚫 Отмена";
 
 // ─── Persistent bottom keyboard ───────────────────────────────────────────────
 const MAIN_KEYBOARD = {
   reply_markup: {
     keyboard: [
       [{ text: BTN_RECIPE }, { text: BTN_PARANORMAL }],
+      [{ text: BTN_CANCEL }],
     ],
     resize_keyboard:    true,
     persistent:         true,
@@ -166,7 +169,7 @@ bot.on("text", async (ctx) => {
   // Skip commands
   if (text.startsWith("/")) return;
   // Skip button labels (handled by bot.hears)
-  if (text === BTN_RECIPE || text === BTN_PARANORMAL) return;
+  if (text === BTN_RECIPE || text === BTN_PARANORMAL || text === BTN_CANCEL) return;
 
   const mode = getMode(userId);
 
@@ -305,6 +308,49 @@ async function handleParanormalText(ctx, text, userId) {
     }
   }, PIPELINE_TIMEOUT_MS);
 }
+
+// ─── Button: Cancel ──────────────────────────────────────────────────────────
+bot.hears(BTN_CANCEL, async (ctx) => {
+  const userId = ctx.from?.id;
+
+  if (!busyUsers.has(userId)) {
+    await ctx.reply(
+      "ℹ️ Нет активных задач для отмены.",
+      MAIN_KEYBOARD
+    );
+    return;
+  }
+
+  busyUsers.delete(userId);
+
+  // Try to cancel the job in ytPosting
+  try {
+    await cancelParanormalJob({ chatId: ctx.chat.id });
+  } catch { /* ytPosting might not know about it yet */ }
+
+  await ctx.reply(
+    "🚫 *Задача отменена*\n\nПипелайн будет остановлен перед следующим шагом.\n\nМожешь отправить новую историю.",
+    { parse_mode: "Markdown", ...MAIN_KEYBOARD }
+  );
+});
+
+// ─── /cancel command ─────────────────────────────────────────────────────────
+bot.command("cancel", async (ctx) => {
+  const userId = ctx.from?.id;
+
+  if (!busyUsers.has(userId)) {
+    await ctx.reply("ℹ️ Нет активных задач для отмены.", MAIN_KEYBOARD);
+    return;
+  }
+
+  busyUsers.delete(userId);
+  try { await cancelParanormalJob({ chatId: ctx.chat.id }); } catch { /* ignore */ }
+
+  await ctx.reply(
+    "🚫 *Задача отменена.* Можешь отправить новую историю.",
+    { parse_mode: "Markdown", ...MAIN_KEYBOARD }
+  );
+});
 
 // ─── Error handler ────────────────────────────────────────────────────────────
 bot.catch((err, ctx) => {

@@ -46,11 +46,34 @@ async function submitParanormalJob({ russianText, botToken, chatId, messageId })
         "Content-Type":    "application/json",
         "X-Trigger-Secret": YTPOSTING_SECRET,
       },
-      timeout: 15000, // We only wait for 202 Accepted, not for pipeline completion
+      timeout: 15000,
     }
   );
 
   return res.data;
 }
 
-module.exports = { submitParanormalJob };
+/**
+ * Sends a cancellation request to ytPosting for the given chat.
+ * ytPosting will stop the pipeline before the next step.
+ *
+ * @param {object} options
+ * @param {number} options.chatId — Telegram chat ID (used as job key)
+ * @returns {Promise<{ status: string }>}
+ */
+async function cancelParanormalJob({ chatId }) {
+  const res = await axios.post(
+    `${YTPOSTING_URL}/paranormal/cancel`,
+    { chatId },
+    {
+      headers: {
+        "Content-Type":    "application/json",
+        "X-Trigger-Secret": YTPOSTING_SECRET,
+      },
+      timeout: 8000,
+    }
+  );
+  return res.data;
+}
+
+module.exports = { submitParanormalJob, cancelParanormalJob };
