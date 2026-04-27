@@ -41,6 +41,43 @@ const MAIN_KEYBOARD = {
 const userStates = new Map(); // mode: "recipe" | "paranormal"
 const busyUsers  = new Set(); // userIds with active paranormal pipeline
 
+// ─── Multi-message accumulator ────────────────────────────────────────────────
+// Telegram splits long messages into several parts (max ~4096 chars each).
+// We buffer them for MESSAGE_ACCUMULATE_MS ms after the last received part,
+// then process the full concatenated text.
+const MESSAGE_ACCUMULATE_MS = 3500; // wait 3.5s after the last message
+const messageBuffers = new Map();   // userId → { parts: string[], timer: NodeJS.Timeout, count: number }
+
+/**
+ * Accumulates text parts for a user.
+ * Returns the full text once the timer fires (via onComplete callback).
+ * If a part arrives while timer is running — resets the timer.
+ */
+function accumulateText(userId, text, onComplete) {
+  if (messageBuffers.has(userId)) {
+    const buf = messageBuffers.get(userId);
+    clearTimeout(buf.timer);
+    buf.parts.push(text);
+    buf.count++;
+    buf.timer = setTimeout(() => {
+      const fullText = messageBuffers.get(userId)?.parts.join("\n\n") || text;
+      messageBuffers.delete(userId);
+      onComplete(fullText, buf.count);
+    }, MESSAGE_ACCUMULATE_MS);
+  } else {
+    const entry = {
+      parts: [text],
+      count: 1,
+      timer: setTimeout(() => {
+        const fullText = messageBuffers.get(userId)?.parts.join("\n\n") || text;
+        messageBuffers.delete(userId);
+        onComplete(fullText, entry.count);
+      }, MESSAGE_ACCUMULATE_MS),
+    };
+    messageBuffers.set(userId, entry);
+  }
+}
+
 function getMode(userId) {
   return (userStates.get(userId) || {}).mode || "recipe";
 }
@@ -256,26 +293,50 @@ async function handleParanormalText(ctx, text, userId) {
     await ctx.reply("🔒 У вас нет доступа к каналу @VoidWhispererX.");
     return;
   }
-  if (text.length < 50) {
-    await ctx.reply("⚠️ История слишком короткая (минимум 50 символов). Добавь больше деталей.");
-    return;
-  }
   if (busyUsers.has(userId)) {
     await ctx.reply("⏳ Твоё видео уже в процессе создания.\nПодожди завершения текущей задачи.");
     return;
   }
 
+  // ── Multi-message accumulator ─────────────────────────────────────────────
+  // Show "typing…" indicator on first message to signal we received it.
+  const isFirstPart = !messageBuffers.has(userId);
+  if (isFirstPart) {
+    // First message part received — let user know we're collecting
+    await ctx.reply(
+      "✍️ *Принял!* Жду пока ты отправишь историю целиком...\n_(если история в нескольких частях — жди, я их собираю)_",
+      { parse_mode: "Markdown" }
+    ).catch(() => {});
+  }
+
+  accumulateText(userId, text, async (fullText, partsCount) => {
+    logInfo(`[paranormal] Accumulated ${partsCount} message parts, total: ${fullText.length} chars`);
+    await runParanormalPipeline(ctx, fullText, userId, partsCount);
+  });
+}
+
+/**
+ * Actually launches the pipeline after all message parts are collected.
+ */
+async function runParanormalPipeline(ctx, fullText, userId, partsCount) {
+  if (fullText.length < 50) {
+    await ctx.reply("⚠️ История слишком короткая (минимум 50 символов). Добавь больше деталей.");
+    return;
+  }
+
+  // Build the status message text
+  const partsInfo = partsCount > 1 ? `\n📦 Частей сообщения: ${partsCount}` : "";
   const statusMsg = await ctx.reply(
-    "🚀 *Запускаем pipeline для @VoidWhispererX...*\n\n🔄 Передаём задачу в ytPosting...",
+    `🚀 *Запускаем pipeline для @VoidWhispererX...*${partsInfo}\n\n🔄 Передаём задачу в ytPosting...`,
     { parse_mode: "Markdown" }
   );
 
   busyUsers.add(userId);
 
   try {
-    logInfo(`[paranormal] Submitting job for user ${userId} (@${ctx.from?.username}), text: ${text.length} chars`);
+    logInfo(`[paranormal] Submitting job for user ${userId} (@${ctx.from?.username}), text: ${fullText.length} chars, parts: ${partsCount}`);
     await submitParanormalJob({
-      russianText: text,
+      russianText: fullText,
       botToken:    BOT_TOKEN,
       chatId:      ctx.chat.id,
       messageId:   statusMsg.message_id,
