@@ -38,10 +38,8 @@ const MAIN_KEYBOARD = {
 };
 
 // ─── Per-user state ────────────────────────────────────────────────────────────
-// mode: "recipe" | "paranormal"
-const userStates   = new Map();
-// Set of userIds currently running the paranormal pipeline
-const busyUsers    = new Set();
+const userStates = new Map(); // mode: "recipe" | "paranormal"
+const busyUsers  = new Set(); // userIds with active paranormal pipeline
 
 function getMode(userId) {
   return (userStates.get(userId) || {}).mode || "recipe";
@@ -63,18 +61,18 @@ bot.use(async (ctx, next) => {
 
 // ─── /start ───────────────────────────────────────────────────────────────────
 bot.start(async (ctx) => {
-  const name   = ctx.from?.first_name || "there";
-  const userId = ctx.from?.id;
+  const name    = ctx.from?.first_name || "there";
+  const userId  = ctx.from?.id;
   userStates.set(userId, { mode: "recipe" });
 
-  const hasRecipe    = canUseRecipeVoice(userId);
+  const hasRecipe     = canUseRecipeVoice(userId);
   const hasParanormal = canUseParanormalChannel(userId);
 
   await ctx.reply(
     `👋 Привет, ${name}!\n\n` +
     `🤖 *YouTube AI Bot*\n\n` +
     `Выбери режим работы с помощью кнопок ниже:\n\n` +
-    `${hasRecipe    ? "✅" : "🔒"} *${BTN_RECIPE}* — генерация профессиональной озвучки для кулинарных видео\n` +
+    `${hasRecipe     ? "✅" : "🔒"} *${BTN_RECIPE}* — генерация профессиональной озвучки для кулинарных видео\n` +
     `${hasParanormal ? "✅" : "🔒"} *${BTN_PARANORMAL}* — автоматическая генерация видео для канала @VoidWhispererX\n\n` +
     `Используй /help для справки.`,
     { parse_mode: "Markdown", ...MAIN_KEYBOARD }
@@ -92,16 +90,17 @@ bot.help(async (ctx) => {
     `Нажми кнопку → отправь текст истории на *русском языке*\n` +
     `Система автоматически:\n` +
     `  1. Переведёт на английский (OpenAI)\n` +
-    `  2. Разобьёт на сцены с тайминогм\n` +
+    `  2. Разобьёт на сцены с таймингом\n` +
     `  3. Сгенерирует изображения (Gemini)\n` +
     `  4. Создаст озвучку (Gemini TTS, Charon)\n` +
     `  5. Смонтирует видео (Ken Burns + субтитры)\n` +
     `  6. Сгенерирует название / описание / теги\n` +
     `  7. Создаст обложку YouTube\n` +
     `  8. Загрузит видео на @VoidWhispererX\n\n` +
-    `⏱ Время обработки: зависит от длины истории\n\n` +
+    `⏱ Время обработки: несколько минут\n\n` +
     `📌 Команды:\n` +
     `/start — главное меню\n` +
+    `/cancel — отменить текущую задачу\n` +
     `/id — твой Telegram ID`,
     { parse_mode: "Markdown", ...MAIN_KEYBOARD }
   );
@@ -116,15 +115,21 @@ bot.command("id", async (ctx) => {
   );
 });
 
+// ─── /cancel command ──────────────────────────────────────────────────────────
+bot.command("cancel", async (ctx) => {
+  const userId = ctx.from?.id;
+  busyUsers.delete(userId);
+  try { await cancelParanormalJob({ chatId: ctx.chat.id }); } catch { /* ignore */ }
+  await ctx.reply("🚫 Задача отменена. Можешь отправить новую историю.", MAIN_KEYBOARD);
+});
+
 // ─── Button: Recipe Voice ─────────────────────────────────────────────────────
 bot.hears(BTN_RECIPE, async (ctx) => {
   const userId = ctx.from?.id;
-
   if (!canUseRecipeVoice(userId)) {
     await ctx.reply("🔒 У вас нет доступа к этой функции.");
     return;
   }
-
   userStates.set(userId, { mode: "recipe" });
   await ctx.reply(
     `🎙️ *Режим: Голос для рецептов*\n\n` +
@@ -137,12 +142,10 @@ bot.hears(BTN_RECIPE, async (ctx) => {
 // ─── Button: Paranormal Channel ───────────────────────────────────────────────
 bot.hears(BTN_PARANORMAL, async (ctx) => {
   const userId = ctx.from?.id;
-
   if (!canUseParanormalChannel(userId)) {
     await ctx.reply("🔒 У вас нет доступа к каналу @VoidWhispererX.");
     return;
   }
-
   userStates.set(userId, { mode: "paranormal" });
   await ctx.reply(
     `👻 *Режим: Паранормальный канал (@VoidWhispererX)*\n\n` +
@@ -161,18 +164,40 @@ bot.hears(BTN_PARANORMAL, async (ctx) => {
   );
 });
 
-// ─── Text handler ─────────────────────────────────────────────────────────────
+// ─── Button: Cancel ───────────────────────────────────────────────────────────
+// IMPORTANT: registered BEFORE bot.on("text") so Telegraf routing reaches it.
+// Telegraf processes middleware in registration order; bot.on("text") would
+// swallow this message and return without calling next() if registered first.
+bot.hears(BTN_CANCEL, async (ctx) => {
+  const userId = ctx.from?.id;
+
+  if (!busyUsers.has(userId)) {
+    await ctx.reply(
+      "ℹ️ Нет активных задач для отмены.\n\nПайплайн не запущен или уже завершён.",
+      MAIN_KEYBOARD
+    );
+    return;
+  }
+
+  busyUsers.delete(userId);
+  try { await cancelParanormalJob({ chatId: ctx.chat.id }); } catch { /* ignore */ }
+
+  await ctx.reply(
+    "🚫 *Задача отменена*\n\nПайплайн будет остановлен перед следующим шагом.\n\nМожешь отправить новую историю.",
+    { parse_mode: "Markdown", ...MAIN_KEYBOARD }
+  );
+});
+
+// ─── Text handler (after all hears — keyboard buttons already handled above) ──
 bot.on("text", async (ctx) => {
   const text   = ctx.message.text;
   const userId = ctx.from?.id;
 
-  // Skip commands
+  // Skip commands and button labels (already handled by hears above)
   if (text.startsWith("/")) return;
-  // Skip button labels (handled by bot.hears)
   if (text === BTN_RECIPE || text === BTN_PARANORMAL || text === BTN_CANCEL) return;
 
   const mode = getMode(userId);
-
   if (mode === "paranormal") {
     await handleParanormalText(ctx, text, userId);
   } else {
@@ -186,7 +211,6 @@ async function handleRecipeText(ctx, text, userId) {
     await ctx.reply("🔒 У вас нет доступа к этой функции.");
     return;
   }
-
   if (text.length < 10) {
     await ctx.reply("⚠️ Текст слишком короткий (минимум 10 символов).");
     return;
@@ -196,15 +220,11 @@ async function handleRecipeText(ctx, text, userId) {
     return;
   }
 
-  const statusMsg = await ctx.reply(
-    "🎙️ Генерирую озвучку...\n⏳ Подожди, это займёт 10–30 секунд."
-  );
-
+  const statusMsg = await ctx.reply("🎙️ Генерирую озвучку...\n⏳ Подожди, это займёт 10–30 секунд.");
   let tmpFilePath = null;
 
   try {
     logInfo(`[recipe] Generating voiceover for user ${userId} (@${ctx.from?.username}), ${text.length} chars`);
-
     const audioBuffer = await generateVoiceover(text);
     tmpFilePath = path.join(os.tmpdir(), `voiceover_${Date.now()}.wav`);
     fs.writeFileSync(tmpFilePath, audioBuffer);
@@ -217,140 +237,72 @@ async function handleRecipeText(ctx, text, userId) {
         caption:   `✅ Озвучка готова!\n📝 Длина текста: ${text.length} символов`,
       }
     );
-
     await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
     logInfo(`[recipe] Voiceover sent to user ${userId}`);
   } catch (error) {
     logError(`[recipe] Failed for user ${userId}: ${error.message}`);
     await ctx.telegram
-      .editMessageText(
-        ctx.chat.id,
-        statusMsg.message_id,
-        undefined,
-        `❌ Не удалось сгенерировать озвучку.\n\nОшибка: ${error.message}\n\nПопробуй ещё раз.`
-      )
+      .editMessageText(ctx.chat.id, statusMsg.message_id, undefined,
+        `❌ Не удалось сгенерировать озвучку.\n\nОшибка: ${error.message}\n\nПопробуй ещё раз.`)
       .catch(() => {});
   } finally {
-    if (tmpFilePath && fs.existsSync(tmpFilePath)) {
-      fs.unlinkSync(tmpFilePath);
-    }
+    if (tmpFilePath && fs.existsSync(tmpFilePath)) fs.unlinkSync(tmpFilePath);
   }
 }
 
-// ─── Handler: Paranormal Video Pipeline ──────────────────────────────────────
+// ─── Handler: Paranormal Video Pipeline ───────────────────────────────────────
 async function handleParanormalText(ctx, text, userId) {
   if (!canUseParanormalChannel(userId)) {
     await ctx.reply("🔒 У вас нет доступа к каналу @VoidWhispererX.");
     return;
   }
-
   if (text.length < 50) {
     await ctx.reply("⚠️ История слишком короткая (минимум 50 символов). Добавь больше деталей.");
     return;
   }
-
   if (busyUsers.has(userId)) {
-    await ctx.reply(
-      "⏳ Твоё видео уже в процессе создания.\n" +
-      "Подожди завершения текущей задачи."
-    );
+    await ctx.reply("⏳ Твоё видео уже в процессе создания.\nПодожди завершения текущей задачи.");
     return;
   }
 
-  // Send initial status message — ytPosting will update it directly during pipeline
   const statusMsg = await ctx.reply(
-    "🚀 *Запускаем pipeline для @VoidWhispererX...*\n\n" +
-    "🔄 Передаём задачу в ytPosting...",
+    "🚀 *Запускаем pipeline для @VoidWhispererX...*\n\n🔄 Передаём задачу в ytPosting...",
     { parse_mode: "Markdown" }
   );
 
   busyUsers.add(userId);
 
   try {
-    logInfo(`[paranormal] Submitting job to ytPosting for user ${userId} (@${ctx.from?.username}), text: ${text.length} chars`);
-
-    // Submit the job to ytPosting — it runs in background and sends Telegram updates itself
+    logInfo(`[paranormal] Submitting job for user ${userId} (@${ctx.from?.username}), text: ${text.length} chars`);
     await submitParanormalJob({
       russianText: text,
       botToken:    BOT_TOKEN,
       chatId:      ctx.chat.id,
       messageId:   statusMsg.message_id,
     });
-
-    // Job accepted — ytPosting will take it from here
     logInfo(`[paranormal] ✅ Job accepted by ytPosting for user ${userId}`);
   } catch (error) {
     logError(`[paranormal] Failed to submit job for user ${userId}: ${error.message}`);
     busyUsers.delete(userId);
-
     const isUnavailable = error?.response?.status >= 500 || error.code === "ECONNREFUSED" || error.code === "ECONNRESET";
     await ctx.telegram
-      .editMessageText(
-        ctx.chat.id,
-        statusMsg.message_id,
-        undefined,
+      .editMessageText(ctx.chat.id, statusMsg.message_id, undefined,
         isUnavailable
           ? `❌ *ytPosting сервис недоступен*\n\nПопробуй позже или свяжись с администратором.\n\`${error.message}\``
           : `❌ *Ошибка при запуске pipeline*\n\n${error.message}\n\nПопробуй ещё раз.`,
-        { parse_mode: "Markdown" }
-      )
+        { parse_mode: "Markdown" })
       .catch(() => {});
     return;
   }
 
-  // ytPosting notifies Telegram when done — bot just needs to release the busy lock
-  // We use a generous timeout as a safety release (pipeline can take 10-30+ min)
-  const PIPELINE_TIMEOUT_MS = 45 * 60 * 1000; // 45 minutes
+  // Release busy lock after 45 min timeout (safety valve)
   setTimeout(() => {
     if (busyUsers.has(userId)) {
       busyUsers.delete(userId);
       logInfo(`[paranormal] Released busy lock for user ${userId} (timeout)`);
     }
-  }, PIPELINE_TIMEOUT_MS);
+  }, 45 * 60 * 1000);
 }
-
-// ─── Button: Cancel ──────────────────────────────────────────────────────────
-bot.hears(BTN_CANCEL, async (ctx) => {
-  const userId = ctx.from?.id;
-
-  if (!busyUsers.has(userId)) {
-    await ctx.reply(
-      "ℹ️ Нет активных задач для отмены.",
-      MAIN_KEYBOARD
-    );
-    return;
-  }
-
-  busyUsers.delete(userId);
-
-  // Try to cancel the job in ytPosting
-  try {
-    await cancelParanormalJob({ chatId: ctx.chat.id });
-  } catch { /* ytPosting might not know about it yet */ }
-
-  await ctx.reply(
-    "🚫 *Задача отменена*\n\nПипелайн будет остановлен перед следующим шагом.\n\nМожешь отправить новую историю.",
-    { parse_mode: "Markdown", ...MAIN_KEYBOARD }
-  );
-});
-
-// ─── /cancel command ─────────────────────────────────────────────────────────
-bot.command("cancel", async (ctx) => {
-  const userId = ctx.from?.id;
-
-  if (!busyUsers.has(userId)) {
-    await ctx.reply("ℹ️ Нет активных задач для отмены.", MAIN_KEYBOARD);
-    return;
-  }
-
-  busyUsers.delete(userId);
-  try { await cancelParanormalJob({ chatId: ctx.chat.id }); } catch { /* ignore */ }
-
-  await ctx.reply(
-    "🚫 *Задача отменена.* Можешь отправить новую историю.",
-    { parse_mode: "Markdown", ...MAIN_KEYBOARD }
-  );
-});
 
 // ─── Error handler ────────────────────────────────────────────────────────────
 bot.catch((err, ctx) => {
@@ -358,47 +310,31 @@ bot.catch((err, ctx) => {
 });
 
 // ─── Paranormal reminders for Igor ────────────────────────────────────────────
-// Пн/Ср/Пт в 10:00 по GMT+3 = 07:00 UTC → cron: "0 7 * * 1,3,5"
-// Igor's Telegram ID: 875313073
 const IGOR_CHAT_ID = 875313073;
-
 const REMINDER_MESSAGES = [
   "👻 *Напоминание — @VoidWhispererX*\n\nСегодня нужно опубликовать видео! 🕙 *10:00 GMT+3*\n\nОткрой бота, выбери 👻 *Паранормальный канал* и отправь историю — видео сгенерируется и загрузится автоматически 🚀",
   "🎬 *Время публиковать! — @VoidWhispererX*\n\nНе забудь про видео сегодня! 🕙 *10:00 GMT+3*\n\nОтправь паранормальную историю на русском в бот → система сама переведёт, озвучит и загрузит на YouTube ✅",
   "⏰ *Пора снимать! — @VoidWhispererX*\n\nСегодня день публикации! 🕙 *10:00 GMT+3*\n\nВыбери 👻 *Паранормальный канал* и пришли текст истории — остальное бот сделает сам 🤖",
 ];
-
 let reminderIndex = 0;
 
 function scheduleIgorReminders(telegramBot) {
-  // Пн/Ср/Пт в 07:00 UTC (= 10:00 GMT+3)
   const cronExpr = process.env.IGOR_REMINDER_CRON || "0 7 * * 1,3,5";
-
   if (!cron.validate(cronExpr)) {
     logError(`[reminder] Invalid cron expression: ${cronExpr}`);
     return;
   }
-
-  cron.schedule(
-    cronExpr,
-    async () => {
-      const msg = REMINDER_MESSAGES[reminderIndex % REMINDER_MESSAGES.length];
-      reminderIndex++;
-
-      logInfo(`[reminder] Sending VoidWhispererX reminder to Igor (${IGOR_CHAT_ID})...`);
-      try {
-        await telegramBot.telegram.sendMessage(IGOR_CHAT_ID, msg, {
-          parse_mode: "Markdown",
-          ...MAIN_KEYBOARD,
-        });
-        logInfo("[reminder] ✅ Reminder sent to Igor");
-      } catch (err) {
-        logError(`[reminder] Failed to send reminder: ${err.message}`);
-      }
-    },
-    { timezone: "UTC" }
-  );
-
+  cron.schedule(cronExpr, async () => {
+    const msg = REMINDER_MESSAGES[reminderIndex % REMINDER_MESSAGES.length];
+    reminderIndex++;
+    logInfo(`[reminder] Sending VoidWhispererX reminder to Igor (${IGOR_CHAT_ID})...`);
+    try {
+      await telegramBot.telegram.sendMessage(IGOR_CHAT_ID, msg, { parse_mode: "Markdown", ...MAIN_KEYBOARD });
+      logInfo("[reminder] ✅ Reminder sent to Igor");
+    } catch (err) {
+      logError(`[reminder] Failed to send reminder: ${err.message}`);
+    }
+  }, { timezone: "UTC" });
   logInfo(`[reminder] ✅ Igor reminder scheduled: ${cronExpr} UTC (= 10:00 GMT+3 Mon/Wed/Fri)`);
 }
 
@@ -409,12 +345,10 @@ async function main() {
 
   await bot.launch();
   logInfo("Bot is running! 🚀");
-  logInfo(`Buttons: "${BTN_RECIPE}" | "${BTN_PARANORMAL}"`);
 
-  // Schedule weekly reminders for Igor about @VoidWhispererX posting
   scheduleIgorReminders(bot);
 
-  process.once("SIGINT",  () => { logInfo("SIGINT — shutting down..."); bot.stop("SIGINT");  });
+  process.once("SIGINT",  () => { logInfo("SIGINT — shutting down...");  bot.stop("SIGINT");  });
   process.once("SIGTERM", () => { logInfo("SIGTERM — shutting down..."); bot.stop("SIGTERM"); });
 }
 
