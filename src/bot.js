@@ -79,7 +79,7 @@ function accumulateText(userId, text, onComplete) {
 }
 
 function getMode(userId) {
-  return (userStates.get(userId) || {}).mode || "recipe";
+  return (userStates.get(userId) || {}).mode || null;
 }
 
 // ─── Auth middleware ───────────────────────────────────────────────────────────
@@ -100,7 +100,7 @@ bot.use(async (ctx, next) => {
 bot.start(async (ctx) => {
   const name    = ctx.from?.first_name || "there";
   const userId  = ctx.from?.id;
-  userStates.set(userId, { mode: "recipe" });
+  // Do NOT set a default mode — user must explicitly press a button
 
   const hasRecipe     = canUseRecipeVoice(userId);
   const hasParanormal = canUseParanormalChannel(userId);
@@ -235,6 +235,18 @@ bot.on("text", async (ctx) => {
   if (text === BTN_RECIPE || text === BTN_PARANORMAL || text === BTN_CANCEL) return;
 
   const mode = getMode(userId);
+
+  // Require explicit button press before processing any text
+  if (!mode) {
+    await ctx.reply(
+      "👆 *Сначала выбери режим с помощью кнопки:*\n\n" +
+      `• *${BTN_RECIPE}* — генерация озвучки\n` +
+      `• *${BTN_PARANORMAL}* — создание видео`,
+      { parse_mode: "Markdown", ...MAIN_KEYBOARD }
+    );
+    return;
+  }
+
   if (mode === "paranormal") {
     await handleParanormalText(ctx, text, userId);
   } else {
