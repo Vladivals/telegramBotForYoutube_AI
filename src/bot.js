@@ -262,6 +262,7 @@ async function handleRecipeText(ctx, text, userId) {
 
   try {
     logInfo(`[recipe] Generating voiceover for user ${userId} (@${ctx.from?.username}), ${text.length} chars`);
+    logInfo(`[recipe] Full text:\n---\n${text}\n---`);
     const audioBuffer = await generateVoiceover(text);
     tmpFilePath = path.join(os.tmpdir(), `voiceover_${Date.now()}.wav`);
     fs.writeFileSync(tmpFilePath, audioBuffer);
@@ -335,6 +336,7 @@ async function runParanormalPipeline(ctx, fullText, userId, partsCount) {
 
   try {
     logInfo(`[paranormal] Submitting job for user ${userId} (@${ctx.from?.username}), text: ${fullText.length} chars, parts: ${partsCount}`);
+    logInfo(`[paranormal] Full text:\n---\n${fullText}\n---`);
     await submitParanormalJob({
       russianText: fullText,
       botToken:    BOT_TOKEN,
