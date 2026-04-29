@@ -234,7 +234,10 @@ bot.on("text", async (ctx) => {
   if (text.startsWith("/")) return;
   if (text === BTN_RECIPE || text === BTN_PARANORMAL || text === BTN_CANCEL) return;
 
+  // ── Always log incoming text BEFORE any mode check ──────────────────────
   const mode = getMode(userId);
+  logInfo(`[incoming] user ${userId} (@${ctx.from?.username}), mode: ${mode || "none"}, ${text.length} chars`);
+  logInfo(`[incoming] Full text:\n---\n${text}\n---`);
 
   // Require explicit button press before processing any text
   if (!mode) {
